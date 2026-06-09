@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ML artifacts (we'll keep small .pkl files committed; ignore big training data)
+data/raw/
+data/processed/
+*.h5
+*.parquet
+
+# ELK / Docker volumes
+docker/esdata/
+docker/kibanadata/
+docker/filebeat-data/
+docker/.env
+
+# SQLite runtime DBs
+*.sqlite
+*.sqlite3
+*.db
+
+# Logs
+*.log
+logs/
+auth.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Generated PDFs (regenerate from incidents on demand)
+reports/output/
+
+# Secrets
+.env
+*.pem
+*.key
