@@ -56,7 +56,9 @@ sudo apt install -y virtualbox virtualbox-ext-pack
 1. Download Kali VirtualBox image (pre-built `.ova`) from kali.org/get-kali → Virtual Machines.
 2. VirtualBox → File → Import Appliance → select the `.ova`.
 3. Settings → Network → **Adapter 1: Host-only Adapter** (`vboxnet0`). This puts Kali on a private network with Ubuntu, NO internet, NO risk of escape. Add a second NAT adapter only if Kali needs internet to install tools.
-4. Start the VM. Default creds: `kali / kali`.
+4. **Settings → System → Base Memory: set to exactly 2048 MB** (we're on 8 GB total — don't go higher).
+5. Settings → System → Processor: 2 CPUs is fine.
+6. Start the VM. Default creds: `kali / kali`.
 
 ### Option B: KVM / virt-manager (lighter, no Oracle)
 
@@ -104,6 +106,13 @@ docker pull docker.elastic.co/beats/filebeat:8.13.0
 ```
 
 If those three pulls finish, ELK will run on this machine.
+
+**Tuning kernel for ES on 8 GB systems (required, one-time):**
+```bash
+# ES needs higher vm.max_map_count or it refuses to start
+sudo sysctl -w vm.max_map_count=262144
+echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf
+```
 
 ---
 

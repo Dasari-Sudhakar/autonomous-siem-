@@ -20,6 +20,25 @@
 
 ---
 
+## Hardware budget (target system: 8 GB RAM, VT-x enabled)
+
+| Component | RAM |
+|---|---|
+| Ubuntu host (idle) | ~1.5 GB |
+| Elasticsearch (heap capped 1 GB) | ~1.5 GB |
+| Kibana | ~0.7 GB |
+| Filebeat + FastAPI orchestrator | ~0.3 GB |
+| Kali VM (set to 2 GB) | 2.0 GB |
+| **Free buffer** | **~2.0 GB** |
+
+**Non-negotiables on 8 GB:**
+- Cap ES heap in `docker-compose.yml`: `ES_JAVA_OPTS: "-Xms1g -Xmx1g"` and disable swap with `bootstrap.memory_lock: true`.
+- Allocate Kali VM exactly 2 GB (VirtualBox → VM Settings → System → Base Memory). Do not go higher.
+- Close all browsers during demo. Use only the terminal + Kibana tab.
+- If ES still OOMs (check with `docker stats`): drop heap to 768m, or fall back to OpenSearch single-node (lighter footprint).
+
+---
+
 ## Architecture (matches your diagram, simplified)
 
 ```
