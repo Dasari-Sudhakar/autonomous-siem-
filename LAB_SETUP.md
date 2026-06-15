@@ -1,155 +1,156 @@
-# Day 0 -- Lab Setup
+# Lab Setup -- Windows host + Ubuntu VM
 
-Three boxes:
-1. **Ubuntu host** -- runs ELK + the orchestrator. Your dual-boot Ubuntu.
-2. **Target VM** -- Ubuntu Server 22.04 minimal, 1 GB RAM, VirtualBox. Runs sshd + Filebeat.
-3. **Phone** -- Termux + Hydra. The attacker.
+Two machines:
+1. **Ubuntu Server VM** on Windows (VirtualBox, 4 GB RAM, bridged network). Runs everything: sshd, ELK, orchestrator, dashboard.
+2. **Phone** with Termux + Hydra. The attacker.
 
-Exit signal for Day 0: hydra from the phone produces failed-SSH entries on the target VM, those entries appear in Kibana within ~10 s.
+Windows itself just runs Firefox to view the dashboard at the VM's IP.
 
----
-
-## 1. Ubuntu host prep
-
-```bash
-sudo apt update && sudo apt upgrade -y
-
-git clone https://github.com/Dasari-Sudhakar/autonomous-siem-.git
-cd autonomous-siem-
-
-./bootstrap.sh    # installs Docker, Python deps, generates SSH key, pulls ELK images
-```
-
-**Important:** Bootstrap prints two values you'll need on the target VM:
-- The orchestrator SSH **pubkey** (`siem-orchestrator`)
-- The Ubuntu host's **LAN IP** (for ES ingest)
-
-Copy both somewhere (paste into a text file, send to yourself via WhatsApp Web, whatever).
-
-If Docker was installed for the first time, log out + log back in before continuing.
-
-Allow ES traffic from the target VM:
-```bash
-sudo ufw allow from any to any port 9200 proto tcp
-```
+Exit signal for Day 0: failed SSH from the phone appears in the dashboard at `http://<vm-ip>:8000/` within ~15s.
 
 ---
 
-## 2. Wi-Fi / network setup
+## 1. Install VirtualBox on Windows
 
-The phone, the Ubuntu host, and the target VM all need to be on the same network.
+Download from https://www.virtualbox.org/wiki/Downloads -> Windows hosts -> install with defaults.
 
-**Recommended: phone hotspot mode.** Turn on hotspot on your phone. Connect the Ubuntu laptop to the phone's hotspot. The target VM will use VirtualBox **bridged mode** on the same Wi-Fi interface, getting an IP from the phone's hotspot.
-
-Why hotspot? You control the network. College/home Wi-Fi may block client-to-client traffic, which kills the demo.
-
-Note the IP space the phone hotspot uses -- usually `192.168.43.x` (Android) or `172.20.10.x` (iOS).
+Also install the **Extension Pack** from the same page (lets bridged networking work cleanly).
 
 ---
 
-## 3. Create the target VM in VirtualBox
+## 2. Get the Ubuntu Server ISO
 
-```bash
-sudo apt install -y virtualbox virtualbox-ext-pack
-```
+Download Ubuntu Server 22.04 LTS from https://ubuntu.com/download/server (~1.5 GB).
 
-Download Ubuntu Server 22.04 ISO (~1.5 GB): https://ubuntu.com/download/server
+Pick the **server** ISO, not desktop. Lower RAM, no GUI overhead.
+
+---
+
+## 3. Network: turn on phone hotspot before creating the VM
+
+Why hotspot: you own the network, no college Wi-Fi blocking client-to-client. Phone, Windows, and the VM all sit on the same hotspot subnet.
+
+Turn on hotspot on the phone. Connect the Windows laptop to it.
+
+---
+
+## 4. Create the VM in VirtualBox
 
 VirtualBox -> New:
-- Name: `siem-target`
+- Name: `siem-allinone`
 - Type: Linux / Ubuntu (64-bit)
-- Base memory: **1024 MB** (do not go higher)
-- Processors: 1
-- Create virtual hard disk, 10 GB, VDI dynamically allocated
+- Base memory: **4096 MB**
+- Processors: 2
+- Hard disk: VDI, 20 GB, dynamically allocated
 
-Before starting:
-- Settings -> Network -> Adapter 1: **Bridged Adapter**, name = your Wi-Fi interface (e.g. `wlp3s0`). Promiscuous mode: Allow All.
-- Settings -> Storage -> attach the Ubuntu Server ISO.
+Before you start it -- settings:
+- **Network -> Adapter 1: Bridged Adapter**, Name = the Wi-Fi adapter you're connected to (the phone hotspot). Promiscuous mode: Allow All.
+- Storage -> attach the Ubuntu Server ISO to the optical drive.
 
-Start the VM, install Ubuntu Server. Choices during install:
-- Server name: `siem-target`
-- Username: `siem` (must match `TARGET_USER` in `.env`)
-- Password: anything (you'll SSH in with key after setup)
-- **Check "Install OpenSSH server"** during the installer
+---
+
+## 5. Install Ubuntu Server inside the VM
+
+Boot the VM. Walk through the installer:
+- Server name: `siem`
+- Username: anything you like (e.g. `siem`) -- this is the user the orchestrator will run as
+- Password: anything memorable
+- **Check "Install OpenSSH server"** during the installer (important)
 - Skip snap-store selections
-- Reboot when done
+- Reboot when done. The ISO will eject itself.
 
 Log in. Check the IP:
 ```bash
 ip -4 addr show
 ```
-You should see a `192.168.x.y` on the LAN. **Note this** -- it becomes `TARGET_HOST` in `.env`.
+
+Note the bridged IP (likely `192.168.x.y` or `172.20.10.x` on iOS hotspot). **You will use this from Windows and from the phone.**
 
 ---
 
-## 4. Run target-vm/setup.sh ON THE TARGET
-
-The repo has a setup script. Get it to the target VM:
+## 6. Run the project bootstrap inside the VM
 
 ```bash
-# On the target VM:
 sudo apt-get update && sudo apt-get install -y git
 git clone https://github.com/Dasari-Sudhakar/autonomous-siem-.git
-cd autonomous-siem-/target-vm
-
-# Replace the values with your real ones (from bootstrap.sh output on the host):
-sudo ES_HOST="192.168.x.11" \
-     PUBKEY="ssh-ed25519 AAAA... siem-orchestrator" \
-     ./setup.sh
+cd autonomous-siem-
+./bootstrap.sh
 ```
 
-The script installs sshd config, the orchestrator pubkey, passwordless sudo (`iptables` + `kill` only), Filebeat 8.13, and starts Filebeat shipping to the host's Elasticsearch.
+Bootstrap installs Docker, Python deps, pulls ELK images, tunes the kernel for ES, sets up passwordless sudo for `iptables` and `kill`, and prints your VM's IP.
+
+If Docker was just installed: `logout` and log back in (so the docker group takes effect), then run `./bootstrap.sh` once more to finish the image pulls.
 
 ---
 
-## 5. Set up Termux on the phone (attacker)
+## 7. Set up Termux on the phone
 
-Install Termux from F-Droid (the Play Store version is outdated; use F-Droid):
+Install Termux from **F-Droid** (NOT Play Store -- Play Store version is frozen):
 https://f-droid.org/en/packages/com.termux/
 
 In Termux:
 ```bash
 pkg update -y
-pkg install -y hydra openssh nano
+pkg install -y hydra openssh
 
-# Test you can reach the target:
-ssh wronguser@192.168.x.12     # answer "yes", then password "wrong" -- closes
+# Smoke test: one failed ssh attempt against the VM
+ssh wronguser@<vm-ip>     # press y, type any wrong password
 ```
 
-This single failed ssh attempt should already show up in Kibana once ELK is up.
+You should see the failed entry in the VM:
+```bash
+sudo tail -n 3 /var/log/auth.log
+# Failed password for wronguser from <phone-ip>
+```
 
 ---
 
-## 6. Verification (on the Ubuntu host)
-
-After running `target-vm/setup.sh`:
+## 8. Start the SIEM stack (inside the VM)
 
 ```bash
-# Edit .env to point at your target VM
-nano .env
-# Set TARGET_HOST=192.168.x.12 (your target VM's bridged IP)
+make up                   # ES + Kibana + Filebeat in Docker
+# wait ~30s for Kibana to be reachable
+curl -s http://localhost:9200/filebeat-*/_count | jq
+# count should grow each time you fail-ssh from the phone
 
-# Start ELK
-make up
-
-# Wait ~30s, then verify Filebeat reached ES from the target:
-curl -s "http://localhost:9200/filebeat-*/_count" | jq
-
-# Verify orchestrator can SSH into the target:
-ssh -i ~/.ssh/siem_orchestrator_ed25519 siem@192.168.x.12 "sudo -n iptables -L | head"
+make orchestrator         # FastAPI + dashboard on port 8000
 ```
 
-If both succeed, **Day 0 is done**.
+Now open Firefox **on Windows** at:
+
+```
+http://<vm-ip>:8000/
+```
+
+You should see the live dashboard.
+
+---
+
+## 9. The first attack
+
+In Termux on the phone:
+
+```bash
+# Wordlists (one-time)
+printf 'root\nadmin\nubuntu\nguest\nsiem\ntest\n' > users.txt
+printf 'password\n123456\nadmin\nletmein\nubuntu\nqwerty\npass\n' > pass.txt
+
+# Attack
+hydra -L users.txt -P pass.txt -t 4 <vm-ip> ssh
+```
+
+In ~15s the dashboard banner flips to red, an active block appears, the "Sessions killed" counter shows >0, and hydra dies on the phone. Click the PDF link in the dashboard to download the incident report.
 
 ---
 
 ## Day 0 exit checklist
 
-- [ ] Ubuntu host: `bootstrap.sh` ran clean, SSH key generated
-- [ ] Target VM: Ubuntu Server installed, bridged network, IP on the LAN
-- [ ] Target VM: `target-vm/setup.sh` ran successfully, Filebeat running
-- [ ] Phone: Termux + hydra installed, can ssh-attempt the target
-- [ ] Host: Filebeat events visible in ES (`curl filebeat-*/_count` > 0)
-- [ ] Host: orchestrator SSH key reaches the target with `sudo -n iptables -L`
+- [ ] VirtualBox installed on Windows
+- [ ] Ubuntu Server VM created (4 GB RAM, bridged), Ubuntu installed
+- [ ] `bootstrap.sh` ran clean inside the VM
+- [ ] `make up` brings up ES + Kibana + Filebeat, no errors in `docker compose ps`
+- [ ] Dashboard reachable from Windows at `http://<vm-ip>:8000/`
+- [ ] Phone Termux + hydra installed
+- [ ] One manual `ssh wronguser@<vm-ip>` from phone appears in Kibana / `filebeat-*` index
 
-When all six are ticked, message me and we move to Day 1 (run the orchestrator, fire the first hydra burst, watch the BLOCKED line appear).
+When all seven are ticked, you're ready for Day 1 (`make train` + first hydra burst against the running orchestrator).

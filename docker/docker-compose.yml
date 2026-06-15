@@ -8,13 +8,12 @@ services:
       - ES_JAVA_OPTS=-Xms1g -Xmx1g
       - bootstrap.memory_lock=true
       - cluster.routing.allocation.disk.threshold_enabled=false
-      - network.host=0.0.0.0
     ulimits:
       memlock:
         soft: -1
         hard: -1
     ports:
-      - "0.0.0.0:9200:9200"
+      - "9200:9200"
     volumes:
       - esdata:/usr/share/elasticsearch/data
     healthcheck:
@@ -35,8 +34,19 @@ services:
       elasticsearch:
         condition: service_healthy
 
-  # Filebeat does NOT run here. It runs on the target VM and ships to
-  # this Elasticsearch over the network. See target-vm/setup.sh.
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.13.0
+    container_name: siem-filebeat
+    user: root
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/log:/var/log:ro
+      - filebeat-data:/usr/share/filebeat/data
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
 
 volumes:
   esdata:
+  filebeat-data:

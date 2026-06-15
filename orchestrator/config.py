@@ -20,11 +20,5 @@ class Settings(BaseSettings):
     enable_responder: bool = True
     dry_run: bool = False
 
-    # Target VM (separate Ubuntu Server box where sshd lives and where iptables blocks land)
-    target_host: str = "192.168.56.12"
-    target_user: str = "siem"
-    target_ssh_key: str = "~/.ssh/siem_orchestrator_ed25519"
-    target_ssh_timeout: int = 10
-
 
 settings = Settings()

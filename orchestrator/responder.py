@@ -1,12 +1,10 @@
-"""Remote responder.
+"""Local responder.
 
-The orchestrator runs on the Ubuntu host. The target sshd lives on a separate
-VM. So iptables and session-kill have to land on the target, not on the host
-running this code. We reach the target over SSH using a pre-shared key set up
-by bootstrap.sh + target-vm/setup.sh.
+Runs in the same VM as sshd. iptables blocks and session-kill happen
+locally via sudo (passwordless for `iptables` and `kill` only, set up by
+bootstrap.sh).
 """
 import logging
-import os
 import re
 import subprocess
 
@@ -15,61 +13,52 @@ from .config import settings
 log = logging.getLogger(__name__)
 
 
-def _remote(cmd: list[str]) -> tuple[bool, str]:
-    """Run a command on the target VM via SSH. Returns (ok, stdout-or-stderr)."""
+def _iptables(*args) -> bool:
     if settings.dry_run:
-        log.info("[DRY-RUN] remote: %s", " ".join(cmd))
-        return True, ""
-
-    key_path = os.path.expanduser(settings.target_ssh_key)
-    ssh_cmd = [
-        "ssh",
-        "-i", key_path,
-        "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", f"ConnectTimeout={settings.target_ssh_timeout}",
-        f"{settings.target_user}@{settings.target_host}",
-        *cmd,
-    ]
+        log.info("[DRY-RUN] iptables %s", " ".join(args))
+        return True
     try:
-        out = subprocess.run(
-            ssh_cmd, check=True, capture_output=True, text=True,
-            timeout=settings.target_ssh_timeout + 5,
-        )
-        return True, out.stdout
+        subprocess.run(["sudo", "-n", "iptables", *args],
+                       check=True, capture_output=True)
+        return True
     except subprocess.CalledProcessError as e:
-        log.error("remote cmd failed (%s): %s", e.returncode, e.stderr.strip())
-        return False, e.stderr
-    except subprocess.TimeoutExpired:
-        log.error("remote cmd timed out: %s", cmd)
-        return False, "timeout"
+        log.error("iptables %s failed: %s", args, e.stderr.decode(errors="ignore"))
+        return False
 
 
 def block_ip(ip: str) -> bool:
-    ok, _ = _remote(["sudo", "-n", "iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"])
-    return ok
+    return _iptables("-A", "INPUT", "-s", ip, "-j", "DROP")
 
 
 def unblock_ip(ip: str) -> bool:
-    ok, _ = _remote(["sudo", "-n", "iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"])
-    return ok
+    return _iptables("-D", "INPUT", "-s", ip, "-j", "DROP")
 
 
 def kill_sessions_from(ip: str) -> int:
-    """Kill any active sshd sessions on the target originating from `ip`."""
-    ok, out = _remote(["ss", "-tnp", "state", "established"])
-    if not ok:
+    """Kill any active sshd sessions originating from `ip`."""
+    if settings.dry_run:
+        return 0
+    try:
+        out = subprocess.run(
+            ["ss", "-tnp", "state", "established"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        log.error("ss failed: %s", e)
         return 0
 
     killed = 0
-    for line in out.splitlines():
+    for line in out.stdout.splitlines():
         if ":22 " not in line or ip not in line:
             continue
         m = re.search(r"pid=(\d+)", line)
         if not m:
             continue
         pid = m.group(1)
-        ok2, _ = _remote(["sudo", "-n", "kill", "-9", pid])
-        if ok2:
+        try:
+            subprocess.run(["sudo", "-n", "kill", "-9", pid],
+                           check=True, capture_output=True)
             killed += 1
+        except subprocess.CalledProcessError:
+            pass
     return killed
