@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autonomous SIEM -- Live</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --line:#30363d;
+    --text:#c9d1d9; --muted:#8b949e;
+    --red:#f85149; --amber:#d29922; --green:#3fb950; --blue:#58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 24px; font-size: 13px; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.5px; }
+  header h1 span { color: var(--red); }
+  .status { font-size: 12px; }
+  .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; margin-right: 6px; }
+  .ok .dot   { background: var(--green); }
+  .warn .dot { background: var(--amber); animation: pulse 1s infinite; }
+  .crit .dot { background: var(--red);   animation: pulse 0.5s infinite; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .full { grid-column: 1 / -1; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; }
+  .panel h2 { margin: 0 0 10px 0; font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); font-weight: 600; }
+  .panel h2 .count { color: var(--blue); margin-left: 6px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: var(--muted); font-weight: normal; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: none; }
+  .empty { color: var(--muted); font-style: italic; padding: 12px 0; }
+
+  .ip { color: var(--blue); font-weight: 600; }
+  .ip.bad { color: var(--red); }
+  .vmal { color: var(--red); font-weight: 600; }
+  .vben { color: var(--green); }
+  .vunk { color: var(--muted); }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+  .badge.kill { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.4); }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; }
+  .stat .label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .stat .value { font-size: 24px; font-weight: 600; margin-top: 4px; }
+  .stat.red .value   { color: var(--red); }
+  .stat.green .value { color: var(--green); }
+  .stat.blue .value  { color: var(--blue); }
+  .stat.amber .value { color: var(--amber); }
+
+  footer { margin-top: 20px; color: var(--muted); font-size: 11px; text-align: right; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Autonomous <span>SIEM</span> -- Live Console</h1>
+  <div class="status" id="status">connecting...</div>
+</header>
+
+<div class="stats">
+  <div class="stat blue"> <div class="label">Failed SSH (60s)</div> <div class="value" id="s_events">0</div> </div>
+  <div class="stat amber"><div class="label">Active suspects</div>  <div class="value" id="s_suspects">0</div></div>
+  <div class="stat red">  <div class="label">Active blocks</div>    <div class="value" id="s_blocks">0</div>   </div>
+  <div class="stat green"><div class="label">Sessions killed</div>  <div class="value" id="s_killed">0</div>  </div>
+</div>
+
+<div class="grid">
+  <div class="panel full">
+    <h2>Attack feed -- failed SSH (last 60s) <span class="count" id="c_events"></span></h2>
+    <table id="t_events">
+      <thead><tr><th style="width:90px;">Time</th><th>Source IP</th><th>User</th><th>Target host</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Active blocks (auto-response) <span class="count" id="c_blocks"></span></h2>
+    <table id="t_blocks">
+      <thead><tr><th>ID</th><th>IP</th><th>TTL left</th><th>Killed</th><th>Report</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Recent alerts (rule + ML) <span class="count" id="c_alerts"></span></h2>
+    <table id="t_alerts">
+      <thead><tr><th style="width:90px;">Time</th><th>IP</th><th>Rule</th><th>ML</th><th>Final</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<footer id="foot">refreshing every 2s</footer>
+
+<script>
+const fmtTime = ts => {
+  if (typeof ts === 'string') return new Date(ts).toLocaleTimeString();
+  return new Date(ts * 1000).toLocaleTimeString();
+};
+const fmtTTL = (bAt, ttl) => {
+  const left = bAt + ttl - Math.floor(Date.now() / 1000);
+  if (left <= 0) return '<span class="vunk">expired</span>';
+  const m = Math.floor(left / 60), s = left % 60;
+  return `${m}m ${String(s).padStart(2,'0')}s`;
+};
+const verdictClass = v => v === 'malicious' ? 'vmal' : v === 'benign' ? 'vben' : 'vunk';
+const get = async u => { try { const r = await fetch(u); return r.ok ? await r.json() : null; } catch { return null; } };
+
+let lastOk = 0;
+
+async function refresh() {
+  // Active blocks
+  const blocks = (await get('/responses/active')) || [];
+  document.getElementById('s_blocks').textContent = blocks.length;
+  document.getElementById('s_killed').textContent = blocks.reduce((a,b)=>a+(b.sessions_killed||0),0);
+  document.getElementById('c_blocks').textContent = '(' + blocks.length + ')';
+
+  const btb = document.querySelector('#t_blocks tbody');
+  btb.innerHTML = blocks.length === 0
+    ? `<tr><td colspan="5" class="empty">No active blocks. System nominal.</td></tr>`
+    : blocks.map(b => `
+      <tr>
+        <td>${b.id}</td>
+        <td class="ip bad">${b.ip}</td>
+        <td>${fmtTTL(b.blocked_at, b.ttl_sec)}</td>
+        <td>${b.sessions_killed > 0 ? `<span class="badge kill">${b.sessions_killed}</span>` : '0'}</td>
+        <td><a href="/api/incident/${b.id}.pdf" target="_blank">PDF</a></td>
+      </tr>`).join('');
+
+  // Failed events + alerts
+  const events = (await get('/api/events/recent?seconds=60')) || [];
+  document.getElementById('s_events').textContent = events.length;
+  document.getElementById('c_events').textContent = '(' + events.length + ')';
+
+  const etb = document.querySelector('#t_events tbody');
+  etb.innerHTML = events.length === 0
+    ? `<tr><td colspan="4" class="empty">No failed SSH attempts in the last 60s.</td></tr>`
+    : events.slice(0, 12).map(e => `
+      <tr>
+        <td>${fmtTime(e.ts)}</td>
+        <td class="ip">${e.ip || '?'}</td>
+        <td>${e.user || '?'}</td>
+        <td>${e.host || '?'}</td>
+      </tr>`).join('');
+
+  const alerts = (await get('/api/alerts/recent?seconds=300')) || [];
+  document.getElementById('s_suspects').textContent = new Set(alerts.map(a=>a.source_ip)).size;
+  document.getElementById('c_alerts').textContent = '(' + alerts.length + ')';
+
+  const atb = document.querySelector('#t_alerts tbody');
+  atb.innerHTML = alerts.length === 0
+    ? `<tr><td colspan="5" class="empty">No alerts in last 5 min.</td></tr>`
+    : alerts.slice(0, 10).map(a => `
+      <tr>
+        <td>${fmtTime(a['@timestamp'])}</td>
+        <td class="ip">${a.source_ip}</td>
+        <td class="${verdictClass(a.rule_verdict)}">${a.rule_verdict}</td>
+        <td class="${verdictClass(a.ml_verdict)}">${a.ml_verdict}</td>
+        <td class="${verdictClass(a.final_verdict)}">${a.final_verdict}</td>
+      </tr>`).join('');
+
+  // Status banner
+  const s = document.getElementById('status');
+  if (blocks.length > 0) {
+    s.className = 'status crit';
+    s.innerHTML = `<span class="dot"></span> ${blocks.length} active block(s) -- threat neutralised`;
+  } else if (events.length > 0) {
+    s.className = 'status warn';
+    s.innerHTML = `<span class="dot"></span> attack in progress -- ${events.length} fails / 60s`;
+  } else {
+    s.className = 'status ok';
+    s.innerHTML = `<span class="dot"></span> live monitoring -- no active threat`;
+  }
+  lastOk = Date.now();
+  document.getElementById('foot').textContent = 'last update ' + new Date().toLocaleTimeString() + ' -- refreshing every 2s';
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
