@@ -85,8 +85,10 @@ See `PLAN.md` for the RAM budget.
 
 ## Lab topology
 
-- **Ubuntu host (dual-boot)**: runs ELK + orchestrator + the target `sshd`.
+- **Ubuntu host (dual-boot)**: runs ELK + orchestrator + the target `sshd`. Co-located by design to fit 8 GB RAM.
 - **Kali (VM in Ubuntu, VirtualBox host-only network, 2 GB RAM)**: attacker, runs Hydra.
+
+The original architecture diagram has Target and SIEM as separate boxes — we collapse them onto one host because the data flow (auth.log → Filebeat → ES → orchestrator → iptables) is identical. See `PLAN.md` for the viva framing of this choice. A real second target is a one-line Filebeat config change, listed in Future Work.
 
 See `LAB_SETUP.md` for the lab walkthrough.
 

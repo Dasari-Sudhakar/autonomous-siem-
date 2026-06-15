@@ -58,6 +58,17 @@
                                           [SQLite: responses]
 ```
 
+### Why target and SIEM are co-located on one host
+
+The original architecture diagram shows Target System and SIEM Engine as separate boxes. In this v1 lab, **the Ubuntu host plays both roles**: it runs the target `sshd` AND the SIEM stack (ELK + orchestrator). This is a deliberate concession to the 8 GB RAM budget — adding a second VM for a separate target would push total RAM usage past 12 GB and crash Elasticsearch under load.
+
+Functionally nothing changes. Filebeat reads `/var/log/auth.log` regardless of whether the log was written by a remote host or the local one. The orchestrator's `iptables` block lands on the same host that runs sshd — so the attacker is locked out of the target, exactly as it would be in a distributed setup. The detection pipeline (target → Filebeat → ES → rule + ML → iptables) is identical.
+
+**Viva framing (rehearse this):**
+> "Production SIEM deployments ship logs from N target hosts to a centralized SIEM cluster. For the lab, we co-locate the roles on a single 8 GB host. Filebeat treats the local auth.log no differently than a remote one, so adding a real second target is a one-line change to a remote Filebeat config — covered in Future Work."
+
+This framing is honest, hardware-justified, and architecturally sound.
+
 ---
 
 ## Day-by-day
