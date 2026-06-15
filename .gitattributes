@@ -1,0 +1,8 @@
+# Force LF on files that must run on Linux even when authored on Windows
+*.sh        text eol=lf
+*.py        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+Makefile    text eol=lf
+*.j2        text eol=lf
+.env*       text eol=lf
