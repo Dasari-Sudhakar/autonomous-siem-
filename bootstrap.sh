@@ -49,13 +49,15 @@ if ! grep -q "vm.max_map_count" /etc/sysctl.conf; then
     echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf >/dev/null
 fi
 
-if [[ "$DOCKER_INSTALLED_NOW" -eq 0 ]] || groups "$USER" | grep -q docker; then
+if docker ps >/dev/null 2>&1; then
     say "Pulling ELK images (~2 GB total)..."
     docker pull docker.elastic.co/elasticsearch/elasticsearch:8.13.0
     docker pull docker.elastic.co/kibana/kibana:8.13.0
     docker pull docker.elastic.co/beats/filebeat:8.13.0
 else
-    warn "Skipping image pulls -- log out + log back in, then re-run."
+    warn "Docker group not active in this shell yet."
+    warn "Run:  newgrp docker  &&  bash bootstrap.sh"
+    warn "(or log out + log back in, then re-run bootstrap.sh)"
 fi
 
 say "Granting passwordless sudo for iptables + kill (orchestrator response actions)..."
