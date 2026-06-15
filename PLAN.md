@@ -13,61 +13,71 @@
 | Detection | Sigma-style rule + Isolation Forest (ML second opinion) |
 | Response | `iptables` block source IP (TTL 1h, rollback logged) + kill active sessions |
 | Stack | Docker Compose: Elasticsearch + Kibana + Filebeat. Python FastAPI orchestrator. SQLite for response audit. |
-| Lab | Ubuntu host = SIEM + target sshd. Kali = VM inside Ubuntu (VirtualBox or KVM/virt-manager) |
+| Lab | 3 boxes: phone (Termux+Hydra) attacker, Ubuntu Server VM target, Ubuntu host SIEM. See Architecture below. |
 | Report output | Per-incident PDF via Jinja2 + WeasyPrint |
 
 **Cut from v1 (goes in "Future Work"):** port scan detection, SQLi, reverse shell detection, multi-host correlation, SOAR playbook engine, threat intel feeds.
 
 ---
 
-## Hardware budget (target system: 8 GB RAM, VT-x enabled)
+## Hardware budget (host: 8 GB RAM, VT-x enabled)
 
 | Component | RAM |
 |---|---|
 | Ubuntu host (idle) | ~1.5 GB |
 | Elasticsearch (heap capped 1 GB) | ~1.5 GB |
 | Kibana | ~0.7 GB |
-| Filebeat + FastAPI orchestrator | ~0.3 GB |
-| Kali VM (set to 2 GB) | 2.0 GB |
-| **Free buffer** | **~2.0 GB** |
+| FastAPI orchestrator | ~0.2 GB |
+| Ubuntu Server target VM (1024 MB) | 1.0 GB |
+| **Free buffer** | **~3.1 GB** |
 
 **Non-negotiables on 8 GB:**
-- Cap ES heap in `docker-compose.yml`: `ES_JAVA_OPTS: "-Xms1g -Xmx1g"` and disable swap with `bootstrap.memory_lock: true`.
-- Allocate Kali VM exactly 2 GB (VirtualBox → VM Settings → System → Base Memory). Do not go higher.
-- Close all browsers during demo. Use only the terminal + Kibana tab.
-- If ES still OOMs (check with `docker stats`): drop heap to 768m, or fall back to OpenSearch single-node (lighter footprint).
+- Cap ES heap in `docker-compose.yml`: `ES_JAVA_OPTS: "-Xms1g -Xmx1g"` and lock with `bootstrap.memory_lock: true`.
+- Allocate target VM exactly 1024 MB (VirtualBox -> System -> Base Memory). Do not go higher.
+- Close browsers during demo. Only Firefox showing Kibana + terminal.
+- If ES still OOMs (`docker stats`): drop heap to 768m or fall back to OpenSearch single-node.
+
+The phone (Termux attacker) costs **zero** host RAM -- runs entirely on the phone.
 
 ---
 
-## Architecture (matches your diagram, simplified)
+## Architecture (matches the original diagram literally)
 
 ```
-[Kali VM]  ──hydra──>  [Ubuntu host: sshd]
-                            │
-                            │ /var/log/auth.log
-                            ▼
-                        [Filebeat]
-                            │
-                            ▼
-                     [Elasticsearch]  ◄──── [FastAPI Orchestrator]
-                            │                  │   - rule engine (poll ES)
-                            ▼                  │   - Isolation Forest scorer
-                        [Kibana]               │   - iptables responder
-                                               │   - PDF report generator
-                                               ▼
-                                          [SQLite: responses]
+[Phone / Termux]                         [Target VM: Ubuntu Server]
+ 192.168.x.10                              192.168.x.12 (bridged)
+       |                                      ^   |
+       | hydra ssh                            |   | Filebeat ships
+       v                                      |   | /var/log/auth.log
+ [Target VM sshd] <-+                         |   v
+                    |                         |  [Elasticsearch]
+                    |                         |   on Ubuntu host
+        SSH remote: |                         |   192.168.x.11:9200
+        iptables -A INPUT -s <phone> -j DROP  |
+        sudo kill <pid>                       |
+                    |                         v
+              +-----+-----+               [Kibana 5601]
+              |           |
+              | Orchestrator on Ubuntu host
+              | - polls ES every 10s
+              | - rule + IsolationForest
+              | - SSHes target to block + kill
+              | - writes audit to SQLite
+              +-----------+
 ```
 
-### Why target and SIEM are co-located on one host
+Three boxes, three roles:
 
-The original architecture diagram shows Target System and SIEM Engine as separate boxes. In this v1 lab, **the Ubuntu host plays both roles**: it runs the target `sshd` AND the SIEM stack (ELK + orchestrator). This is a deliberate concession to the 8 GB RAM budget — adding a second VM for a separate target would push total RAM usage past 12 GB and crash Elasticsearch under load.
+| Box | Role | RAM |
+|-----|------|-----|
+| Phone (Termux) | Attacker — runs Hydra | 0 (on phone) |
+| Ubuntu Server VM | Target — runs sshd + Filebeat | 1 GB |
+| Ubuntu host | SIEM — runs ES + Kibana + Orchestrator | 3.4 GB |
 
-Functionally nothing changes. Filebeat reads `/var/log/auth.log` regardless of whether the log was written by a remote host or the local one. The orchestrator's `iptables` block lands on the same host that runs sshd — so the attacker is locked out of the target, exactly as it would be in a distributed setup. The detection pipeline (target → Filebeat → ES → rule + ML → iptables) is identical.
+The orchestrator does **remote response over SSH**: it holds a pre-shared key for the `siem` user on the target, which has passwordless sudo only for `iptables` and `kill`. When the pipeline decides to block, the orchestrator runs the iptables and kill commands on the target VM, not on the host. This matches how real SOAR products dispatch playbooks to remote endpoints.
 
-**Viva framing (rehearse this):**
-> "Production SIEM deployments ship logs from N target hosts to a centralized SIEM cluster. For the lab, we co-locate the roles on a single 8 GB host. Filebeat treats the local auth.log no differently than a remote one, so adding a real second target is a one-line change to a remote Filebeat config — covered in Future Work."
-
-This framing is honest, hardware-justified, and architecturally sound.
+**Viva framing:**
+> "The target VM is a separate host on the network. The SIEM ingests via Filebeat over the LAN, exactly as it would from any number of monitored hosts. The autonomous response is dispatched as a remote action -- the orchestrator SSHes into the target with a pre-shared key and a narrowly scoped sudoers entry (iptables and kill only), executes the block, and audits the action both in SQLite and in Elasticsearch."
 
 ---
 

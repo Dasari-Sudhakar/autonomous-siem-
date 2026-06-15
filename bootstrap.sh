@@ -73,7 +73,14 @@ say "Creating .env from example..."
 [[ -f .env ]] || cp .env.example .env
 
 say "Marking scripts executable..."
-chmod +x attack/*.sh kibana/setup.sh 2>/dev/null || true
+chmod +x attack/*.sh kibana/setup.sh target-vm/setup.sh 2>/dev/null || true
+
+say "Generating orchestrator SSH key (if missing) ..."
+KEY="$HOME/.ssh/siem_orchestrator_ed25519"
+if [[ ! -f "$KEY" ]]; then
+    mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+    ssh-keygen -t ed25519 -f "$KEY" -N "" -C "siem-orchestrator" >/dev/null
+fi
 
 cat <<EOF
 
@@ -98,14 +105,27 @@ fi
 
 cat <<EOF
 NEXT STEPS:
-  1. Set up Kali VM (LAB_SETUP.md sections 3-4)
-  2. Start ELK:                make up
-  3. Open Kibana:              http://localhost:5601
-  4. Generate benign baseline: ./attack/benign_traffic.sh    (let it run ~15 min while you set up Kali)
-  5. Train ML model:           make train
-  6. Start orchestrator:       make orchestrator
-  7. Attack from Kali:         ./attack/ssh_brute.sh <ubuntu-ip>
-  8. Watch Kibana + the orchestrator log: BLOCKED message + Kali Hydra dies.
-  9. Generate PDF report:      make report ID=1
+
+  Orchestrator SSH pubkey (paste this into target-vm/setup.sh as PUBKEY=...):
+
+$(cat "$KEY.pub")
+
+  Ubuntu host IP on the LAN (paste into target-vm/setup.sh as ES_HOST=...):
+
+$(ip -4 addr show | awk '/inet / && \$2 !~ /^127/ {print "    "\$2}' | head -3)
+
+  1. Create the target VM (LAB_SETUP.md sections 3-5: Ubuntu Server, bridged net, 1 GB)
+  2. On the target VM: run target-vm/setup.sh with ES_HOST + PUBKEY set
+  3. Set up Termux on your phone (LAB_SETUP.md section 6)
+  4. Open .env and set TARGET_HOST to the target VM's IP
+  5. Start ELK:                make up
+  6. Open Kibana:              http://<host-ip>:5601
+  7. Verify Filebeat ingest:   curl -s http://<host-ip>:9200/filebeat-*/_count
+  8. Generate baseline:        ssh in a few times from your phone or host
+  9. Train ML model:           make train
+ 10. Start orchestrator:       make orchestrator
+ 11. Attack from phone:        Termux: hydra -L users -P pass <target-ip> ssh
+ 12. Watch the BLOCKED line in the orchestrator log; phone hydra dies.
+ 13. Generate PDF report:      make report ID=1
 
 EOF

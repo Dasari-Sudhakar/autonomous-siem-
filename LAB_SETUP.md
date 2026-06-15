@@ -1,136 +1,155 @@
-# Day 0 — Lab Setup (Ubuntu host + Kali VM)
+# Day 0 -- Lab Setup
 
-Target: failed SSH from Kali shows up in Kibana within 10s.
+Three boxes:
+1. **Ubuntu host** -- runs ELK + the orchestrator. Your dual-boot Ubuntu.
+2. **Target VM** -- Ubuntu Server 22.04 minimal, 1 GB RAM, VirtualBox. Runs sshd + Filebeat.
+3. **Phone** -- Termux + Hydra. The attacker.
+
+Exit signal for Day 0: hydra from the phone produces failed-SSH entries on the target VM, those entries appear in Kibana within ~10 s.
 
 ---
 
-## 1. Ubuntu host prep (one-time)
+## 1. Ubuntu host prep
 
 ```bash
-# Update + install essentials
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y openssh-server git curl ufw python3-venv
 
-# Make sure sshd is running (this is your "target" service)
-sudo systemctl enable --now ssh
-sudo systemctl status ssh
+git clone https://github.com/Dasari-Sudhakar/autonomous-siem-.git
+cd autonomous-siem-
 
-# Note your host IP on the network the Kali VM will see
-ip -4 addr show | grep inet
+./bootstrap.sh    # installs Docker, Python deps, generates SSH key, pulls ELK images
 ```
 
-Allow SSH through the firewall for now (we will let our orchestrator manage iptables later):
+**Important:** Bootstrap prints two values you'll need on the target VM:
+- The orchestrator SSH **pubkey** (`siem-orchestrator`)
+- The Ubuntu host's **LAN IP** (for ES ingest)
 
+Copy both somewhere (paste into a text file, send to yourself via WhatsApp Web, whatever).
+
+If Docker was installed for the first time, log out + log back in before continuing.
+
+Allow ES traffic from the target VM:
 ```bash
-sudo ufw allow ssh
-sudo ufw --force enable
+sudo ufw allow from any to any port 9200 proto tcp
 ```
 
 ---
 
-## 2. Install Docker + Compose on Ubuntu
+## 2. Wi-Fi / network setup
 
-```bash
-# Docker
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER
-newgrp docker
+The phone, the Ubuntu host, and the target VM all need to be on the same network.
 
-# Test
-docker run --rm hello-world
-docker compose version
-```
+**Recommended: phone hotspot mode.** Turn on hotspot on your phone. Connect the Ubuntu laptop to the phone's hotspot. The target VM will use VirtualBox **bridged mode** on the same Wi-Fi interface, getting an IP from the phone's hotspot.
 
-If Docker pulls fail, you don't have working internet — fix that first.
+Why hotspot? You control the network. College/home Wi-Fi may block client-to-client traffic, which kills the demo.
+
+Note the IP space the phone hotspot uses -- usually `192.168.43.x` (Android) or `172.20.10.x` (iOS).
 
 ---
 
-## 3. Create the Kali VM (two options — pick one)
-
-### Option A: VirtualBox (easiest, GUI)
+## 3. Create the target VM in VirtualBox
 
 ```bash
 sudo apt install -y virtualbox virtualbox-ext-pack
 ```
 
-1. Download Kali VirtualBox image (pre-built `.ova`) from kali.org/get-kali → Virtual Machines.
-2. VirtualBox → File → Import Appliance → select the `.ova`.
-3. Settings → Network → **Adapter 1: Host-only Adapter** (`vboxnet0`). This puts Kali on a private network with Ubuntu, NO internet, NO risk of escape. Add a second NAT adapter only if Kali needs internet to install tools.
-4. **Settings → System → Base Memory: set to exactly 2048 MB** (we're on 8 GB total — don't go higher).
-5. Settings → System → Processor: 2 CPUs is fine.
-6. Start the VM. Default creds: `kali / kali`.
+Download Ubuntu Server 22.04 ISO (~1.5 GB): https://ubuntu.com/download/server
 
-### Option B: KVM / virt-manager (lighter, no Oracle)
+VirtualBox -> New:
+- Name: `siem-target`
+- Type: Linux / Ubuntu (64-bit)
+- Base memory: **1024 MB** (do not go higher)
+- Processors: 1
+- Create virtual hard disk, 10 GB, VDI dynamically allocated
 
+Before starting:
+- Settings -> Network -> Adapter 1: **Bridged Adapter**, name = your Wi-Fi interface (e.g. `wlp3s0`). Promiscuous mode: Allow All.
+- Settings -> Storage -> attach the Ubuntu Server ISO.
+
+Start the VM, install Ubuntu Server. Choices during install:
+- Server name: `siem-target`
+- Username: `siem` (must match `TARGET_USER` in `.env`)
+- Password: anything (you'll SSH in with key after setup)
+- **Check "Install OpenSSH server"** during the installer
+- Skip snap-store selections
+- Reboot when done
+
+Log in. Check the IP:
 ```bash
-sudo apt install -y qemu-kvm libvirt-daemon-system virt-manager
-sudo usermod -aG libvirt $USER
-newgrp libvirt
+ip -4 addr show
 ```
-
-Use virt-manager GUI → New VM → import the Kali ISO → set network to "default" (NAT bridge libvirt creates).
+You should see a `192.168.x.y` on the LAN. **Note this** -- it becomes `TARGET_HOST` in `.env`.
 
 ---
 
-## 4. Verify Kali → Ubuntu network path
+## 4. Run target-vm/setup.sh ON THE TARGET
 
-On Ubuntu host, get its IP on the host-only/libvirt network:
+The repo has a setup script. Get it to the target VM:
+
 ```bash
-ip -4 addr show vboxnet0     # or virbr0 for KVM
+# On the target VM:
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/Dasari-Sudhakar/autonomous-siem-.git
+cd autonomous-siem-/target-vm
+
+# Replace the values with your real ones (from bootstrap.sh output on the host):
+sudo ES_HOST="192.168.x.11" \
+     PUBKEY="ssh-ed25519 AAAA... siem-orchestrator" \
+     ./setup.sh
 ```
 
-From Kali:
-```bash
-ping <ubuntu-ip>             # should reply
-ssh wronguser@<ubuntu-ip>    # should prompt for password — close it
-```
-
-Then on Ubuntu:
-```bash
-sudo tail -n 5 /var/log/auth.log
-# you should see: "Failed password for wronguser from <kali-ip>"
-```
-
-If you see that line — the auth log is capturing what we need.
+The script installs sshd config, the orchestrator pubkey, passwordless sudo (`iptables` + `kill` only), Filebeat 8.13, and starts Filebeat shipping to the host's Elasticsearch.
 
 ---
 
-## 5. Bring up the ELK stack (Day 0 lite — just verify it boots)
+## 5. Set up Termux on the phone (attacker)
 
-We will write the full `docker-compose.yml` and `filebeat.yml` together once you confirm Steps 1–4 work. For now, sanity-check:
+Install Termux from F-Droid (the Play Store version is outdated; use F-Droid):
+https://f-droid.org/en/packages/com.termux/
 
+In Termux:
 ```bash
-docker pull docker.elastic.co/elasticsearch/elasticsearch:8.13.0
-docker pull docker.elastic.co/kibana/kibana:8.13.0
-docker pull docker.elastic.co/beats/filebeat:8.13.0
+pkg update -y
+pkg install -y hydra openssh nano
+
+# Test you can reach the target:
+ssh wronguser@192.168.x.12     # answer "yes", then password "wrong" -- closes
 ```
 
-If those three pulls finish, ELK will run on this machine.
-
-**Tuning kernel for ES on 8 GB systems (required, one-time):**
-```bash
-# ES needs higher vm.max_map_count or it refuses to start
-sudo sysctl -w vm.max_map_count=262144
-echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf
-```
+This single failed ssh attempt should already show up in Kibana once ELK is up.
 
 ---
 
-## 6. Repo clone (so you have the same files on Ubuntu)
+## 6. Verification (on the Ubuntu host)
 
-The plan + code live at `E:\Claude MP\10th June` on Windows. Two ways to get it onto Ubuntu:
+After running `target-vm/setup.sh`:
 
-- **GitHub (recommended):** create a private repo, `git push` from Windows, `git clone` on Ubuntu.
-- **NTFS mount:** if the E: drive is NTFS, `sudo mount /dev/sdaX /mnt/work` and work from there directly. Slower, breaks symlinks. Use only if no internet.
+```bash
+# Edit .env to point at your target VM
+nano .env
+# Set TARGET_HOST=192.168.x.12 (your target VM's bridged IP)
+
+# Start ELK
+make up
+
+# Wait ~30s, then verify Filebeat reached ES from the target:
+curl -s "http://localhost:9200/filebeat-*/_count" | jq
+
+# Verify orchestrator can SSH into the target:
+ssh -i ~/.ssh/siem_orchestrator_ed25519 siem@192.168.x.12 "sudo -n iptables -L | head"
+```
+
+If both succeed, **Day 0 is done**.
 
 ---
 
 ## Day 0 exit checklist
 
-- [ ] Ubuntu sshd running, reachable from Kali VM
-- [ ] Failed SSH attempts from Kali appear in `/var/log/auth.log`
-- [ ] Docker + Compose installed
-- [ ] ELK images pulled
-- [ ] Repo synced to Ubuntu
+- [ ] Ubuntu host: `bootstrap.sh` ran clean, SSH key generated
+- [ ] Target VM: Ubuntu Server installed, bridged network, IP on the LAN
+- [ ] Target VM: `target-vm/setup.sh` ran successfully, Filebeat running
+- [ ] Phone: Termux + hydra installed, can ssh-attempt the target
+- [ ] Host: Filebeat events visible in ES (`curl filebeat-*/_count` > 0)
+- [ ] Host: orchestrator SSH key reaches the target with `sudo -n iptables -L`
 
-When all five are ticked, message me and we start Day 1 (write the actual ELK compose file, Filebeat config, and the FastAPI orchestrator skeleton).
+When all six are ticked, message me and we move to Day 1 (run the orchestrator, fire the first hydra burst, watch the BLOCKED line appear).

@@ -7,41 +7,60 @@ Final-year project — a SIEM that detects, eradicates, and reports SSH brute-fo
 - Reporting: per-incident PDF via Jinja2 + WeasyPrint
 - Stack: Elasticsearch + Kibana + Filebeat + FastAPI + SQLite
 
-## Quick start (Ubuntu host)
+## Quick start
 
+Three boxes: **Ubuntu host** (ELK + orchestrator), **target VM** (Ubuntu Server, sshd + Filebeat),
+**phone** (Termux + Hydra).
+
+### On the Ubuntu host
 ```bash
 git clone https://github.com/Dasari-Sudhakar/autonomous-siem-.git
 cd autonomous-siem-
 
-# 1. One-shot install (apt deps, Docker, Python venv, ES kernel tuning, image pulls)
-./bootstrap.sh
+./bootstrap.sh           # apt + Docker + Python venv + ES tuning + SSH key + image pulls
+# (log out/in if Docker was just installed)
 
-# If Docker was installed for the first time: log out, log back in, then continue.
+# bootstrap prints the orchestrator SSH pubkey + the host's LAN IP -- copy both.
 
-# 2. Allow the orchestrator to run iptables and kill without a password prompt
-echo "$USER ALL=(root) NOPASSWD: /usr/sbin/iptables, /bin/kill" | sudo tee /etc/sudoers.d/siem-orchestrator
-sudo chmod 440 /etc/sudoers.d/siem-orchestrator
+sudo ufw allow from any to any port 9200 proto tcp
+make up                  # ES on :9200, Kibana on :5601
+```
 
-# 3. Bring up ELK
-make up                          # ES on :9200, Kibana on :5601
+### On the target VM (Ubuntu Server 22.04, 1 GB RAM, bridged network, OpenSSH-server installed during setup)
+```bash
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/Dasari-Sudhakar/autonomous-siem-.git
+cd autonomous-siem-/target-vm
+sudo ES_HOST="<ubuntu-host-IP>" PUBKEY="<pubkey from bootstrap.sh>" ./setup.sh
+```
 
-# 4. Generate ~15 min of benign baseline so ML has something to learn
-./attack/benign_traffic.sh 127.0.0.1 15
+### Back on the Ubuntu host
+```bash
+# Set the target VM's IP
+sed -i "s|^TARGET_HOST=.*|TARGET_HOST=<target-vm-IP>|" .env
 
-# 5. Train the Isolation Forest
+# Verify ingest + remote SSH
+curl -s "http://localhost:9200/filebeat-*/_count" | jq
+ssh -i ~/.ssh/siem_orchestrator_ed25519 siem@<target-vm-IP> "sudo -n iptables -L | head"
+
+# Generate baseline (15 min of normal ssh attempts) then train ML
+ssh -i ~/.ssh/siem_orchestrator_ed25519 siem@<target-vm-IP> "logger -t sshd 'test'"   # quick smoke test
 make train
 
-# 6. Start the orchestrator (leave running in one terminal)
-make orchestrator
+make orchestrator    # leave running
+```
 
-# 7. From Kali (in another terminal):
-./attack/ssh_brute.sh <ubuntu-host-ip>
+### On the phone (Termux from F-Droid)
+```bash
+pkg install -y hydra
+hydra -L users.txt -P pass.txt -t 4 <target-vm-IP> ssh
+```
 
-# 8. Watch the orchestrator log -- you'll see BLOCKED <kali-ip> within ~15s.
-#    Hydra dies. Kibana shows the alert + response. List active blocks:
+Within ~15 s: orchestrator log prints `BLOCKED <phone-ip>`, the orchestrator SSHes
+into the target and runs `iptables` + `kill`, hydra dies. List active blocks:
+
+```bash
 curl http://localhost:8000/responses/active
-
-# 9. Generate a PDF report for an incident
 make report ID=1
 ```
 
@@ -49,33 +68,36 @@ make report ID=1
 
 ```
 .
-├── bootstrap.sh              # one-shot installer
+├── bootstrap.sh              # one-shot Ubuntu host installer
 ├── Makefile                  # stage runner
 ├── PLAN.md                   # day-by-day plan + viva defense
-├── LAB_SETUP.md              # Ubuntu + Kali VM lab steps
-├── .env.example
+├── LAB_SETUP.md              # 3-box lab walkthrough
+├── .env.example              # config (target VM host, SSH key path, etc.)
 ├── docker/
-│   ├── docker-compose.yml    # ES + Kibana + Filebeat (1GB ES heap)
-│   └── filebeat.yml
-├── orchestrator/             # FastAPI app
-│   ├── main.py               # FastAPI entry, /health, /responses/*
-│   ├── pipeline.py           # poll loop: ES → rules → ML → respond
+│   └── docker-compose.yml    # ES + Kibana only (Filebeat lives on target)
+├── orchestrator/             # FastAPI app -- runs on Ubuntu host
+│   ├── main.py               # /health, /responses/*
+│   ├── pipeline.py           # poll loop: ES -> rules -> ML -> remote respond
 │   ├── es_client.py
 │   ├── rules.py              # threshold rule (5 fails / 60s / IP)
-│   ├── ml_model.py           # Isolation Forest scorer
-│   ├── responder.py          # iptables block + session kill
-│   ├── db.py                 # SQLite responses audit
-│   └── config.py             # pydantic settings (.env-driven)
+│   ├── ml_model.py           # IsolationForest scorer
+│   ├── responder.py          # SSH-into-target: iptables + kill
+│   ├── db.py                 # SQLite audit
+│   └── config.py             # pydantic-settings (.env-driven)
+├── target-vm/                # runs ON the target VM
+│   ├── setup.sh              # sshd, Filebeat, sudoers, SSH key install
+│   └── README.md
 ├── ml/
-│   └── train.py              # train IsolationForest on benign baseline
+│   └── train.py              # IsolationForest on baseline traffic
 ├── reports/
 │   ├── generate.py           # PDF generator
-│   └── incident.html.j2      # report template
+│   └── incident.html.j2
 ├── attack/
-│   ├── ssh_brute.sh          # hydra wrapper (run from Kali)
-│   └── benign_traffic.sh     # generate baseline for ML training
+│   ├── ssh_brute.sh          # hydra wrapper (works from Termux too)
+│   ├── benign_traffic.sh     # baseline generator
+│   └── termux_setup.md       # phone-side commands
 └── kibana/
-    └── setup.sh              # import dashboards (exported on Day 3)
+    └── setup.sh
 ```
 
 ## Hardware
@@ -85,12 +107,13 @@ See `PLAN.md` for the RAM budget.
 
 ## Lab topology
 
-- **Ubuntu host (dual-boot)**: runs ELK + orchestrator + the target `sshd`. Co-located by design to fit 8 GB RAM.
-- **Kali (VM in Ubuntu, VirtualBox host-only network, 2 GB RAM)**: attacker, runs Hydra.
+- **Ubuntu host (dual-boot)**: runs Elasticsearch, Kibana, and the FastAPI orchestrator. 8 GB total RAM.
+- **Target VM**: Ubuntu Server 22.04 minimal, 1 GB RAM, VirtualBox bridged network. Runs sshd + Filebeat. The orchestrator SSHes into this VM to run remote `iptables` blocks and kill compromised sessions.
+- **Phone**: Termux + Hydra. The attacker. Zero host-RAM cost.
 
-The original architecture diagram has Target and SIEM as separate boxes — we collapse them onto one host because the data flow (auth.log → Filebeat → ES → orchestrator → iptables) is identical. See `PLAN.md` for the viva framing of this choice. A real second target is a one-line Filebeat config change, listed in Future Work.
+This three-box split matches the original architecture diagram literally. See `PLAN.md` for the full architecture and viva framing.
 
-See `LAB_SETUP.md` for the lab walkthrough.
+See `LAB_SETUP.md` for the step-by-step lab walkthrough.
 
 ## Status & timeline
 
